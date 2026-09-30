@@ -86,9 +86,11 @@
     const ball = { x: 260, y: 110, r: 11, vx: 2.3, vy: 0, trail: [] };
     const keys = { left: false, right: false };
     let score = 0;
+    let lives = 3;
     let running = true;
     let lastTime = performance.now();
     let flash = 0;
+    let audioContext;
 
     // 圓形目標：撞到後會反彈、亮起並加分。
     const bumpers = [
@@ -111,15 +113,43 @@
       { pivotX: 325, pivotY: 670, length: 104, side: 1, angle: Math.PI + 0.28, rest: Math.PI + 0.28, active: Math.PI + 0.92 }
     ];
 
-    function resetGame() {
+    // 分數越高，移動倍率越大；上限可避免高速時穿過障礙物。
+    function speedMultiplier() { return 1 + Math.min(score / 2500, .8); }
+
+    // Web Audio 不需要外部音檔，直接合成短促的彈珠碰撞音。
+    // AudioContext 必須在使用者按鍵後建立，才符合瀏覽器的自動播放政策。
+    function startAudio() {
+      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioContext.state === "suspended") audioContext.resume();
+    }
+
+    function playCollisionSound(points) {
+      if (!audioContext) return;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const now = audioContext.currentTime;
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(points >= 100 ? 720 : 480, now);
+      oscillator.frequency.exponentialRampToValueAtTime(180, now + .09);
+      gain.gain.setValueAtTime(.09, now);
+      gain.gain.exponentialRampToValueAtTime(.001, now + .11);
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start(now); oscillator.stop(now + .12);
+    }
+
+    function placeNewBall() {
       Object.assign(ball, { x: 260, y: 105, vx: (Math.random() - .5) * 3, vy: 0, trail: [] });
-      score = 0; flash = 0; running = true;
+    }
+
+    function resetGame() {
+      placeNewBall();
+      score = 0; lives = 3; flash = 0; running = true;
       bumpers.forEach(b => b.hit = 0);
       overlay.classList.remove("show");
       lastTime = performance.now();
     }
 
-    function addScore(value) { score += value; flash = 9; }
+    function addScore(value) { score += value; flash = 9; playCollisionSound(value); }
 
     // 將彈珠從圓形目標推出，再依碰撞法線反射速度。
     function collideBumper(b) {
@@ -176,7 +206,8 @@
       flippers[0].angle += ((keys.left ? flippers[0].active : flippers[0].rest) - flippers[0].angle) * .34 * step;
       flippers[1].angle += ((keys.right ? flippers[1].active : flippers[1].rest) - flippers[1].angle) * .34 * step;
       ball.vy += gravity * step;
-      ball.x += ball.vx * step; ball.y += ball.vy * step;
+      const speed = speedMultiplier();
+      ball.x += ball.vx * step * speed; ball.y += ball.vy * step * speed;
       ball.trail.unshift({ x: ball.x, y: ball.y }); ball.trail.length = Math.min(ball.trail.length, 9);
       if (ball.x - ball.r < 22 || ball.x + ball.r > W - 22) { ball.vx *= -1; ball.x = Math.max(22 + ball.r, Math.min(W - 22 - ball.r, ball.x)); }
       if (ball.y - ball.r < 72) { ball.vy *= -1; ball.y = 72 + ball.r; }
@@ -184,7 +215,13 @@
       bumpers.forEach(b => b.hit = Math.max(0, b.hit - step));
       flash = Math.max(0, flash - step);
       if (ball.y - ball.r > H) {
-        running = false; finalScore.textContent = score; overlay.classList.add("show");
+        lives -= 1;
+        if (lives > 0) {
+          // 還有生命時直接將新彈珠放回發球位置，保留目前分數。
+          placeNewBall();
+        } else {
+          running = false; finalScore.textContent = score; overlay.classList.add("show");
+        }
       }
     }
 
@@ -192,12 +229,16 @@
       ctx.clearRect(0, 0, W, H);
       // 深藍色格線讓彈珠台有科技感。
       ctx.strokeStyle = "#4462a633"; ctx.lineWidth = 1;
-      for (let i = 30; i < W; i += 35) { ctx.beginPath(); ctx.moveTo(i, 65); ctx.lineTo(i, H); ctx.stroke(); }
-      for (let i = 85; i < H; i += 35) { ctx.beginPath(); ctx.moveTo(20, i); ctx.lineTo(W - 20, i); ctx.stroke(); }
-      ctx.fillStyle = "#101b43"; ctx.fillRect(20, 20, W - 40, 42);
-      ctx.fillStyle = "#f4f8ff"; ctx.font = "bold 20px system-ui"; ctx.fillText("NEON PINBALL", 40, 48);
+      for (let i = 30; i < W; i += 35) { ctx.beginPath(); ctx.moveTo(i, 80); ctx.lineTo(i, H); ctx.stroke(); }
+      for (let i = 95; i < H; i += 35) { ctx.beginPath(); ctx.moveTo(20, i); ctx.lineTo(W - 20, i); ctx.stroke(); }
+      ctx.fillStyle = "#101b43"; ctx.fillRect(20, 20, W - 40, 55);
+      ctx.fillStyle = "#f4f8ff"; ctx.font = "bold 17px system-ui"; ctx.fillText("NEON PINBALL", 40, 43);
       ctx.textAlign = "right"; ctx.fillStyle = flash > 0 ? "#ffed82" : "#7cf6ff";
-      ctx.fillText(`SCORE  ${score}`, W - 40, 48); ctx.textAlign = "left";
+      ctx.fillText(`SCORE  ${score}`, W - 40, 43);
+      ctx.textAlign = "left"; ctx.fillStyle = "#ff8b9b"; ctx.font = "bold 14px system-ui";
+      ctx.fillText(`LIVES  ${"●".repeat(lives)}${"○".repeat(3 - lives)}`, 40, 64);
+      ctx.textAlign = "right"; ctx.fillStyle = "#b8c9ee";
+      ctx.fillText(`SPEED x${speedMultiplier().toFixed(1)}`, W - 40, 64); ctx.textAlign = "left";
       blocks.forEach(b => { ctx.save(); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.rotate(b.x < W / 2 ? -.28 : .28); ctx.fillStyle = "#e870a9"; ctx.shadowColor = "#ff5fbd"; ctx.shadowBlur = 12; ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h); ctx.restore(); });
       bumpers.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, b.r + b.hit * .7, 0, Math.PI * 2); ctx.fillStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 12 + b.hit * 3; ctx.fill(); ctx.shadowBlur = 0; ctx.beginPath(); ctx.arc(b.x - 8, b.y - 9, 8, 0, Math.PI * 2); ctx.fillStyle = "#ffffff99"; ctx.fill(); });
       flippers.forEach(f => { const ex = f.pivotX + Math.cos(f.angle) * f.length, ey = f.pivotY + Math.sin(f.angle) * f.length; ctx.strokeStyle = "#ffdb70"; ctx.lineWidth = 18; ctx.lineCap = "round"; ctx.shadowColor = "#ff8f50"; ctx.shadowBlur = 12; ctx.beginPath(); ctx.moveTo(f.pivotX, f.pivotY); ctx.lineTo(ex, ey); ctx.stroke(); ctx.shadowBlur = 0; });
@@ -206,7 +247,7 @@
     }
 
     function loop(now) { const dt = now - lastTime; lastTime = now; if (running) update(dt); draw(); requestAnimationFrame(loop); }
-    window.addEventListener("keydown", e => { if (["ArrowLeft", "ArrowRight"].includes(e.key)) e.preventDefault(); if (e.key === "ArrowLeft") keys.left = true; if (e.key === "ArrowRight") keys.right = true; });
+    window.addEventListener("keydown", e => { if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); startAudio(); } if (e.key === "ArrowLeft") keys.left = true; if (e.key === "ArrowRight") keys.right = true; });
     window.addEventListener("keyup", e => { if (e.key === "ArrowLeft") keys.left = false; if (e.key === "ArrowRight") keys.right = false; });
     restartButton.addEventListener("click", resetGame);
     requestAnimationFrame(loop);
