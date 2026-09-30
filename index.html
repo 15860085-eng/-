@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>霓虹彈珠台</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 10%, #263c73 0, #111a39 35%, #070b1d 75%);
+      color: #f7f7ff;
+      font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+    }
+    .game-shell { position: relative; width: min(92vw, 520px); }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      border: 3px solid #75e9ff;
+      border-radius: 24px;
+      box-shadow: 0 0 16px #33c9f8, 0 0 55px #7255ff66, inset 0 0 25px #61e5ff55;
+      background: #101a3c;
+    }
+    .help {
+      text-align: center;
+      margin: 14px 0 0;
+      color: #b8c9ee;
+      font-size: .95rem;
+      letter-spacing: .04em;
+    }
+    .key { display: inline-block; padding: 1px 8px; border: 1px solid #7495dc; border-radius: 5px; color: white; }
+    #overlay {
+      position: absolute; inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      border-radius: 24px;
+      background: #061029cf;
+      text-align: center;
+    }
+    #overlay.show { display: flex; }
+    #overlay h1 { margin: 0; color: #ffda63; font-size: clamp(2rem, 9vw, 3.4rem); text-shadow: 0 0 18px #ff9d49; }
+    #overlay p { margin: 0; color: #d8e7ff; }
+    button {
+      border: 0; border-radius: 999px; padding: 12px 25px;
+      background: linear-gradient(135deg, #ffbd48, #ff6f79);
+      box-shadow: 0 5px 0 #b84359, 0 0 20px #ff8b68aa;
+      color: #1e1330; cursor: pointer; font: inherit; font-weight: 800;
+    }
+    button:active { transform: translateY(3px); box-shadow: 0 2px 0 #b84359; }
+  </style>
+</head>
+<body>
+  <main class="game-shell">
+    <!-- Canvas 是整個彈珠台的繪圖區域。 -->
+    <canvas id="game" width="520" height="760" aria-label="霓虹彈珠台遊戲"></canvas>
+    <!-- 遊戲結束時才顯示的遮罩與重新開始按鈕。 -->
+    <section id="overlay" aria-live="polite">
+      <h1>Game Over</h1>
+      <p>本局分數：<strong id="final-score">0</strong></p>
+      <button id="restart">重新開始</button>
+    </section>
+    <p class="help"><span class="key">←</span> 左擋板　 <span class="key">→</span> 右擋板</p>
+  </main>
+
+  <script>
+    "use strict";
+
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const overlay = document.querySelector("#overlay");
+    const finalScore = document.querySelector("#final-score");
+    const restartButton = document.querySelector("#restart");
+    const W = canvas.width, H = canvas.height;
+
+    // 物理數值以每一幀為單位，讓遊戲在一般螢幕上有自然的速度。
+    const gravity = 0.19;
+    const ball = { x: 260, y: 110, r: 11, vx: 2.3, vy: 0, trail: [] };
+    const keys = { left: false, right: false };
+    let score = 0;
+    let running = true;
+    let lastTime = performance.now();
+    let flash = 0;
+
+    // 圓形目標：撞到後會反彈、亮起並加分。
+    const bumpers = [
+      { x: 155, y: 205, r: 31, points: 100, color: "#ff6d9e", hit: 0 },
+      { x: 365, y: 220, r: 31, points: 100, color: "#58e6ff", hit: 0 },
+      { x: 260, y: 330, r: 35, points: 150, color: "#ffc95e", hit: 0 },
+      { x: 133, y: 412, r: 27, points: 100, color: "#ab7cff", hit: 0 },
+      { x: 388, y: 420, r: 27, points: 100, color: "#75f5a4", hit: 0 }
+    ];
+
+    // 斜方塊也作為會碰撞的障礙物。
+    const blocks = [
+      { x: 70, y: 295, w: 64, h: 18, points: 50 },
+      { x: 386, y: 305, w: 64, h: 18, points: 50 }
+    ];
+
+    // 擋板以一端為旋轉中心。angle 會隨按鍵轉動。
+    const flippers = [
+      { pivotX: 195, pivotY: 670, length: 104, side: -1, angle: -0.28, rest: -0.28, active: -0.92 },
+      { pivotX: 325, pivotY: 670, length: 104, side: 1, angle: Math.PI + 0.28, rest: Math.PI + 0.28, active: Math.PI + 0.92 }
+    ];
+
+    function resetGame() {
+      Object.assign(ball, { x: 260, y: 105, vx: (Math.random() - .5) * 3, vy: 0, trail: [] });
+      score = 0; flash = 0; running = true;
+      bumpers.forEach(b => b.hit = 0);
+      overlay.classList.remove("show");
+      lastTime = performance.now();
+    }
+
+    function addScore(value) { score += value; flash = 9; }
+
+    // 將彈珠從圓形目標推出，再依碰撞法線反射速度。
+    function collideBumper(b) {
+      const dx = ball.x - b.x, dy = ball.y - b.y;
+      const distance = Math.hypot(dx, dy);
+      const minDistance = ball.r + b.r;
+      if (distance < minDistance) {
+        const nx = dx / (distance || 1), ny = dy / (distance || 1);
+        ball.x = b.x + nx * minDistance;
+        ball.y = b.y + ny * minDistance;
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) {
+          ball.vx -= 2 * dot * nx;
+          ball.vy -= 2 * dot * ny;
+          ball.vx *= 1.08; ball.vy *= 1.08;
+          addScore(b.points); b.hit = 10;
+        }
+      }
+    }
+
+    function collideBlock(block) {
+      const nearX = Math.max(block.x, Math.min(ball.x, block.x + block.w));
+      const nearY = Math.max(block.y, Math.min(ball.y, block.y + block.h));
+      const dx = ball.x - nearX, dy = ball.y - nearY;
+      if (dx * dx + dy * dy < ball.r * ball.r) {
+        if (Math.abs(dx) > Math.abs(dy)) ball.vx *= -1;
+        else ball.vy *= -1;
+        ball.vy -= 1.4;
+        addScore(block.points);
+      }
+    }
+
+    // 計算彈珠到擋板線段的最近點，碰到時向上彈射。
+    function collideFlipper(f) {
+      const endX = f.pivotX + Math.cos(f.angle) * f.length;
+      const endY = f.pivotY + Math.sin(f.angle) * f.length;
+      const dx = endX - f.pivotX, dy = endY - f.pivotY;
+      const t = Math.max(0, Math.min(1, ((ball.x - f.pivotX) * dx + (ball.y - f.pivotY) * dy) / (dx * dx + dy * dy)));
+      const px = f.pivotX + dx * t, py = f.pivotY + dy * t;
+      const distX = ball.x - px, distY = ball.y - py;
+      if (distX * distX + distY * distY < (ball.r + 9) ** 2 && ball.vy > -1) {
+        const dist = Math.hypot(distX, distY) || 1;
+        ball.x = px + distX / dist * (ball.r + 9);
+        ball.y = py + distY / dist * (ball.r + 9);
+        ball.vy = -Math.max(7.5, Math.abs(ball.vy) * .92);
+        ball.vx += (t - .5) * 7 + f.side * .5;
+        addScore(10);
+      }
+    }
+
+    function update(dt) {
+      // dt 限制在合理範圍，避免視窗切回來時彈珠瞬移。
+      const step = Math.min(dt / 16.67, 2);
+      flippers[0].angle += ((keys.left ? flippers[0].active : flippers[0].rest) - flippers[0].angle) * .34 * step;
+      flippers[1].angle += ((keys.right ? flippers[1].active : flippers[1].rest) - flippers[1].angle) * .34 * step;
+      ball.vy += gravity * step;
+      ball.x += ball.vx * step; ball.y += ball.vy * step;
+      ball.trail.unshift({ x: ball.x, y: ball.y }); ball.trail.length = Math.min(ball.trail.length, 9);
+      if (ball.x - ball.r < 22 || ball.x + ball.r > W - 22) { ball.vx *= -1; ball.x = Math.max(22 + ball.r, Math.min(W - 22 - ball.r, ball.x)); }
+      if (ball.y - ball.r < 72) { ball.vy *= -1; ball.y = 72 + ball.r; }
+      bumpers.forEach(collideBumper); blocks.forEach(collideBlock); flippers.forEach(collideFlipper);
+      bumpers.forEach(b => b.hit = Math.max(0, b.hit - step));
+      flash = Math.max(0, flash - step);
+      if (ball.y - ball.r > H) {
+        running = false; finalScore.textContent = score; overlay.classList.add("show");
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      // 深藍色格線讓彈珠台有科技感。
+      ctx.strokeStyle = "#4462a633"; ctx.lineWidth = 1;
+      for (let i = 30; i < W; i += 35) { ctx.beginPath(); ctx.moveTo(i, 65); ctx.lineTo(i, H); ctx.stroke(); }
+      for (let i = 85; i < H; i += 35) { ctx.beginPath(); ctx.moveTo(20, i); ctx.lineTo(W - 20, i); ctx.stroke(); }
+      ctx.fillStyle = "#101b43"; ctx.fillRect(20, 20, W - 40, 42);
+      ctx.fillStyle = "#f4f8ff"; ctx.font = "bold 20px system-ui"; ctx.fillText("NEON PINBALL", 40, 48);
+      ctx.textAlign = "right"; ctx.fillStyle = flash > 0 ? "#ffed82" : "#7cf6ff";
+      ctx.fillText(`SCORE  ${score}`, W - 40, 48); ctx.textAlign = "left";
+      blocks.forEach(b => { ctx.save(); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.rotate(b.x < W / 2 ? -.28 : .28); ctx.fillStyle = "#e870a9"; ctx.shadowColor = "#ff5fbd"; ctx.shadowBlur = 12; ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h); ctx.restore(); });
+      bumpers.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, b.r + b.hit * .7, 0, Math.PI * 2); ctx.fillStyle = b.color; ctx.shadowColor = b.color; ctx.shadowBlur = 12 + b.hit * 3; ctx.fill(); ctx.shadowBlur = 0; ctx.beginPath(); ctx.arc(b.x - 8, b.y - 9, 8, 0, Math.PI * 2); ctx.fillStyle = "#ffffff99"; ctx.fill(); });
+      flippers.forEach(f => { const ex = f.pivotX + Math.cos(f.angle) * f.length, ey = f.pivotY + Math.sin(f.angle) * f.length; ctx.strokeStyle = "#ffdb70"; ctx.lineWidth = 18; ctx.lineCap = "round"; ctx.shadowColor = "#ff8f50"; ctx.shadowBlur = 12; ctx.beginPath(); ctx.moveTo(f.pivotX, f.pivotY); ctx.lineTo(ex, ey); ctx.stroke(); ctx.shadowBlur = 0; });
+      ball.trail.slice().reverse().forEach((p, i) => { ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(2, ball.r * (i / ball.trail.length)), 0, Math.PI * 2); ctx.fillStyle = `rgba(123, 239, 255, ${i / ball.trail.length * .25})`; ctx.fill(); });
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fillStyle = "#eafdff"; ctx.shadowColor = "#7fffff"; ctx.shadowBlur = 18; ctx.fill(); ctx.shadowBlur = 0;
+    }
+
+    function loop(now) { const dt = now - lastTime; lastTime = now; if (running) update(dt); draw(); requestAnimationFrame(loop); }
+    window.addEventListener("keydown", e => { if (["ArrowLeft", "ArrowRight"].includes(e.key)) e.preventDefault(); if (e.key === "ArrowLeft") keys.left = true; if (e.key === "ArrowRight") keys.right = true; });
+    window.addEventListener("keyup", e => { if (e.key === "ArrowLeft") keys.left = false; if (e.key === "ArrowRight") keys.right = false; });
+    restartButton.addEventListener("click", resetGame);
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
